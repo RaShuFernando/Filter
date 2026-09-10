@@ -55,22 +55,21 @@ def get_cloudflare_networks():
 
 def is_cloudflare_host(host, cf_networks):
     """Checks if a domain or IP belongs to Cloudflare."""
-    # Step 1: Check if it's directly an IP
+    # Step 1: Check if direct IP
     try:
         ip_obj = ipaddress.ip_address(host)
         return any(ip_obj in net for net in cf_networks)
     except ValueError:
-        pass  # It's a domain name, proceed to Step 2
+        pass
 
-    # Step 2: Resolve the domain to an IP
+    # Step 2: Resolve domain name
     try:
-        # Use a short timeout for DNS resolution so dead domains don't stall the script
         socket.setdefaulttimeout(3)
         resolved_ip = socket.gethostbyname(host)
         ip_obj = ipaddress.ip_address(resolved_ip)
         return any(ip_obj in net for net in cf_networks)
     except Exception:
-        # If a domain completely fails to resolve, we consider it "bad" and filter it out anyway
+        # If DNS fails, treat it as dead/bad node
         return True
 
 
@@ -95,7 +94,7 @@ def extract_lines(raw_data):
 
 
 def process_vless(uri, cf_networks):
-    """Filters, modifies SNI, and checks for Cloudflare."""
+    """Filters, injects Zoom/Teams SNI, and forces allowInsecure bypass."""
     try:
         parsed = urllib.parse.urlparse(uri)
         if parsed.scheme.lower() != "vless":
@@ -105,7 +104,7 @@ def process_vless(uri, cf_networks):
         if parsed.port not in ALLOWED_PORTS:
             return None
 
-        # 2. Check if host is Cloudflare (or a dead domain)
+        # 2. Check if host is Cloudflare (or unreachable domain)
         if not parsed.hostname or is_cloudflare_host(parsed.hostname, cf_networks):
             return None
 
@@ -118,6 +117,9 @@ def process_vless(uri, cf_networks):
         # 4. Inject Zoom/Teams SNI & browser fingerprint
         params["sni"] = [TARGET_SNI]
         params["fp"] = ["chrome"]
+        
+        # 5. Skip certificate verification to stop the fingerprint prompt
+        params["allowInsecure"] = ["1"]
 
         # Rebuild query string
         new_query_pairs = []
@@ -138,7 +140,7 @@ def process_vless(uri, cf_networks):
 def main():
     cf_networks = get_cloudflare_networks()
     if not cf_networks:
-        print("[!] Failed to fetch Cloudflare IP ranges. Aborting to prevent bad configs.")
+        print("[!] Failed to fetch Cloudflare IP ranges. Aborting.")
         return
 
     all_raw_lines = []
@@ -150,32 +152,31 @@ def main():
         print(f"    Extracted {len(lines)} raw configs.")
         all_raw_lines.extend(lines)
 
-    # Remove duplicates before heavy processing
     all_raw_lines = list(set(all_raw_lines))
     print(f"[*] Unique raw configs to process: {len(all_raw_lines)}")
 
     valid_configs = []
     seen = set()
 
-    print("[*] Filtering nodes and checking Cloudflare status (this may take a minute)...")
-    
-    # Use multi-threading to speed up DNS resolution for thousands of domains
+    print("[*] Filtering nodes and verifying hosts (multi-threaded)...")
     with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
-        # Submit all tasks
-        future_to_uri = {executor.submit(process_vless, uri, cf_networks): uri for uri in all_raw_lines if uri.startswith("vless://")}
+        future_to_uri = {
+            executor.submit(process_vless, uri, cf_networks): uri 
+            for uri in all_raw_lines if uri.startswith("vless://")
+        }
         
         for future in concurrent.futures.as_completed(future_to_uri):
             processed = future.result()
             if processed:
                 parsed = urllib.parse.urlparse(processed)
-                # Final deduplication by IP/Domain and Port to prevent identical clones
                 unique_key = (parsed.hostname, parsed.port)
                 if unique_key not in seen:
                     seen.add(unique_key)
                     valid_configs.append(processed)
 
-    print(f"[*] Successfully filtered out Cloudflare! Remaining working nodes: {len(valid_configs)}")
+    print(f"[*] Processing complete. Kept {len(valid_configs)} non-Cloudflare candidates.")
 
+    # Save outputs
     raw_content = "\n".join(valid_configs)
     with open(OUTPUT_TXT, "w", encoding="utf-8") as f:
         f.write(raw_content)
@@ -184,7 +185,7 @@ def main():
     with open(OUTPUT_B64, "w", encoding="utf-8") as f:
         f.write(b64_content)
 
-    print(f"[*] Generated: {OUTPUT_TXT} and {OUTPUT_B64}")
+    print(f"[*] Saved files: {OUTPUT_TXT} and {OUTPUT_B64}")
 
 
 if __name__ == "__main__":
