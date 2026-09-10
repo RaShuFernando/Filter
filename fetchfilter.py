@@ -12,6 +12,8 @@ SOURCE_URLS = [
     "https://raw.githubusercontent.com/Epodonios/v2ray-configs/refs/heads/main/All_Configs_base64_Sub.txt",
     "https://github.com/nikita29a/FreeProxyList/raw/refs/heads/main/mirror/1.txt",
     "https://github.com/nikita29a/FreeProxyList/raw/refs/heads/main/mirror/23.txt",
+    "https://github.com/nikita29a/FreeProxyList/raw/refs/heads/main/mirror/3.txt",
+    "https://github.com/nikita29a/FreeProxyList/raw/refs/heads/main/mirror/5.txt",
 ]
 
 # Output files
