@@ -1,8 +1,6 @@
 import base64
-import concurrent.futures
-import ipaddress
+import json
 import os
-import socket
 import ssl
 import urllib.parse
 import urllib.request
@@ -17,13 +15,23 @@ SOURCE_URLS = [
 OUTPUT_TXT = "zoom-teams-sub.txt"
 OUTPUT_B64 = "zoom-teams-sub-b64.txt"
 
-# Rules for Zoom / Teams bypass
-TARGET_SNI = "aka.ms"
-ALLOWED_PORTS = {443, 8443}
+# Whitelisted root domains for Zoom/Teams packages (matches base domain and all subdomains)
+ALLOWED_ROOT_DOMAINS = [
+    "microsoft.com",
+    "zoom.us",
+    "office.com",
+    "office365.com",
+    "teams.microsoft.com",
+    "azure.com",
+    "azure.net",
+    "aka.ms",
+    "live.com",
+    "skype.com",
+]
 
 
-def fetch_url_content(url, timeout=20):
-    """Fetches raw text content from a given URL."""
+def fetch_url_content(url, timeout=25):
+    """Fetches raw subscription text from a given URL."""
     headers = {"User-Agent": "v2rayNG/1.8.5"}
     req = urllib.request.Request(url, headers=headers)
     ctx = ssl.create_default_context()
@@ -35,51 +43,13 @@ def fetch_url_content(url, timeout=20):
         return ""
 
 
-def get_cloudflare_networks():
-    """Fetches Cloudflare's official IPv4 and IPv6 ranges."""
-    print("[*] Downloading official Cloudflare IP ranges...")
-    cf_ipv4 = fetch_url_content("https://www.cloudflare.com/ips-v4", timeout=10)
-    cf_ipv6 = fetch_url_content("https://www.cloudflare.com/ips-v6", timeout=10)
-    
-    networks = []
-    for cidr in cf_ipv4.splitlines() + cf_ipv6.splitlines():
-        cidr = cidr.strip()
-        if cidr:
-            try:
-                networks.append(ipaddress.ip_network(cidr))
-            except ValueError:
-                pass
-    print(f"[*] Loaded {len(networks)} Cloudflare subnets.")
-    return networks
-
-
-def is_cloudflare_host(host, cf_networks):
-    """Checks if a domain or IP belongs to Cloudflare."""
-    # Step 1: Check if direct IP
-    try:
-        ip_obj = ipaddress.ip_address(host)
-        return any(ip_obj in net for net in cf_networks)
-    except ValueError:
-        pass
-
-    # Step 2: Resolve domain name
-    try:
-        socket.setdefaulttimeout(3)
-        resolved_ip = socket.gethostbyname(host)
-        ip_obj = ipaddress.ip_address(resolved_ip)
-        return any(ip_obj in net for net in cf_networks)
-    except Exception:
-        # If DNS fails, treat it as dead/bad node
-        return True
-
-
 def extract_lines(raw_data):
-    """Handles both plain text lists and Base64-encoded subscription blocks."""
-    lines = []
+    """Decodes Base64 subscriptions or splits plain text lines."""
     raw_data = raw_data.strip()
     if not raw_data:
-        return lines
+        return []
 
+    # Attempt Base64 decode first
     try:
         missing_padding = len(raw_data) % 4
         if missing_padding:
@@ -93,99 +63,98 @@ def extract_lines(raw_data):
     return [line.strip() for line in raw_data.splitlines() if line.strip()]
 
 
-def process_vless(uri, cf_networks):
-    """Filters, injects Zoom/Teams SNI, and forces allowInsecure bypass."""
+def matches_whitelist(domain):
+    """Checks if a domain or hostname ends with any of our allowed root domains."""
+    if not domain:
+        return False
+    domain = domain.lower().strip()
+    for root in ALLOWED_ROOT_DOMAINS:
+        if domain == root or domain.endswith("." + root):
+            return True
+    return False
+
+
+def is_target_config(uri):
+    """
+    Checks if a configuration natively uses a Microsoft or Zoom domain
+    in its SNI, Host, or Server address.
+    """
     try:
-        parsed = urllib.parse.urlparse(uri)
-        if parsed.scheme.lower() != "vless":
-            return None
+        # 1. Handle VLESS and Trojan
+        if uri.startswith("vless://") or uri.startswith("trojan://"):
+            parsed = urllib.parse.urlparse(uri)
+            query_params = urllib.parse.parse_qs(parsed.query)
 
-        # 1. Verify port
-        if parsed.port not in ALLOWED_PORTS:
-            return None
+            # Check SNI, host header, or peer names
+            sni = query_params.get("sni", [""])[0]
+            host = query_params.get("host", [""])[0]
+            peer = query_params.get("peer", [""])[0]
+            server_name = query_params.get("serverName", [""])[0]
 
-        # 2. Check if host is Cloudflare (or unreachable domain)
-        if not parsed.hostname or is_cloudflare_host(parsed.hostname, cf_networks):
-            return None
+            domains_to_test = [sni, host, peer, server_name]
 
-        # 3. Must have TLS
-        params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
-        security = params.get("security", [""])[0].lower()
-        if security != "tls":
-            return None
+            if any(matches_whitelist(d) for d in domains_to_test):
+                return True
 
-        # 4. Inject Zoom/Teams SNI & browser fingerprint
-        params["sni"] = [TARGET_SNI]
-        params["fp"] = ["chrome"]
-        
-        # 5. Skip certificate verification to stop the fingerprint prompt
-        params["allowInsecure"] = ["1"]
+        # 2. Handle VMess
+        elif uri.startswith("vmess://"):
+            b64_str = uri[8:]
+            missing_padding = len(b64_str) % 4
+            if missing_padding:
+                b64_str += "=" * (4 - missing_padding)
+            json_data = json.loads(base64.b64decode(b64_str).decode("utf-8", errors="ignore"))
 
-        # Rebuild query string
-        new_query_pairs = []
-        for k, v_list in params.items():
-            for v in v_list:
-                new_query_pairs.append(f"{k}={urllib.parse.quote(v)}")
-        new_query = "&".join(new_query_pairs)
+            sni = json_data.get("sni", "")
+            host = json_data.get("host", "")
 
-        original_name = urllib.parse.unquote(parsed.fragment) if parsed.fragment else "Node"
-        new_fragment = urllib.parse.quote(f"[Zoom-Teams] {original_name}")
+            if matches_whitelist(sni) or matches_whitelist(host):
+                return True
 
-        new_parsed = parsed._replace(query=new_query, fragment=new_fragment)
-        return urllib.parse.urlunparse(new_parsed)
     except Exception:
-        return None
+        return False
+
+    return False
 
 
 def main():
-    cf_networks = get_cloudflare_networks()
-    if not cf_networks:
-        print("[!] Failed to fetch Cloudflare IP ranges. Aborting.")
-        return
-
     all_raw_lines = []
-    print("[*] Fetching subscription sources...")
+
+    print("[*] Fetching subscription pools...")
     for url in SOURCE_URLS:
         print(f" -> Downloading from: {url}")
         content = fetch_url_content(url)
         lines = extract_lines(content)
-        print(f"    Extracted {len(lines)} raw configs.")
+        print(f"    Extracted {len(lines)} configs.")
         all_raw_lines.extend(lines)
 
-    all_raw_lines = list(set(all_raw_lines))
-    print(f"[*] Unique raw configs to process: {len(all_raw_lines)}")
+    # Initial deduplication
+    all_raw_lines = list(dict.fromkeys(all_raw_lines))
+    print(f"[*] Total unique configs to scan: {len(all_raw_lines)}")
 
-    valid_configs = []
+    matching_configs = []
     seen = set()
 
-    print("[*] Filtering nodes and verifying hosts (multi-threaded)...")
-    with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
-        future_to_uri = {
-            executor.submit(process_vless, uri, cf_networks): uri 
-            for uri in all_raw_lines if uri.startswith("vless://")
-        }
-        
-        for future in concurrent.futures.as_completed(future_to_uri):
-            processed = future.result()
-            if processed:
-                parsed = urllib.parse.urlparse(processed)
-                unique_key = (parsed.hostname, parsed.port)
-                if unique_key not in seen:
-                    seen.add(unique_key)
-                    valid_configs.append(processed)
+    for line in all_raw_lines:
+        if line in seen:
+            continue
 
-    print(f"[*] Processing complete. Kept {len(valid_configs)} non-Cloudflare candidates.")
+        if is_target_config(line):
+            seen.add(line)
+            matching_configs.append(line)
 
-    # Save outputs
-    raw_content = "\n".join(valid_configs)
+    print(f"[*] Found {len(matching_configs)} configs natively using Microsoft/Zoom domains.")
+
+    # Save output as plain text
+    raw_content = "\n".join(matching_configs)
     with open(OUTPUT_TXT, "w", encoding="utf-8") as f:
         f.write(raw_content)
 
+    # Save output as standard Base64 subscription
     b64_content = base64.b64encode(raw_content.encode("utf-8")).decode("utf-8")
     with open(OUTPUT_B64, "w", encoding="utf-8") as f:
         f.write(b64_content)
 
-    print(f"[*] Saved files: {OUTPUT_TXT} and {OUTPUT_B64}")
+    print(f"[*] Done! Saved to {OUTPUT_TXT} and {OUTPUT_B64}")
 
 
 if __name__ == "__main__":
