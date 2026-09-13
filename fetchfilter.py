@@ -123,6 +123,35 @@ def is_target_config(uri):
     return False
 
 
+def get_config_fingerprint(uri):
+    """
+    Generates a canonical string for a config by stripping out its remark/name.
+    This allows deduplication of identical configs that only differ by name.
+    """
+    try:
+        if uri.startswith("vless://") or uri.startswith("trojan://"):
+            # Strip the remark (everything from '#' onwards)
+            return uri.split("#")[0]
+            
+        elif uri.startswith("vmess://"):
+            b64_str = uri[8:]
+            missing_padding = len(b64_str) % 4
+            if missing_padding:
+                b64_str += "=" * (4 - missing_padding)
+            json_data = json.loads(base64.b64decode(b64_str).decode("utf-8", errors="ignore"))
+
+            # Remove the remark ('ps') key
+            json_data.pop("ps", None)
+
+            # Return a deterministic string representation of the JSON
+            return "vmess://" + json.dumps(json_data, sort_keys=True)
+            
+    except Exception:
+        pass
+        
+    return uri
+
+
 def main():
     all_raw_lines = []
 
@@ -134,19 +163,22 @@ def main():
         print(f"    Extracted {len(lines)} configs.")
         all_raw_lines.extend(lines)
 
-    # Initial deduplication
-    all_raw_lines = list(dict.fromkeys(all_raw_lines))
-    print(f"[*] Total unique configs to scan: {len(all_raw_lines)}")
-
-    matching_configs = []
-    seen = set()
+    # Name-agnostic deduplication
+    unique_configs_pool = []
+    seen_fingerprints = set()
 
     for line in all_raw_lines:
-        if line in seen:
-            continue
+        fingerprint = get_config_fingerprint(line)
+        if fingerprint not in seen_fingerprints:
+            seen_fingerprints.add(fingerprint)
+            unique_configs_pool.append(line)
 
+    print(f"[*] Total unique configs to scan (ignoring name changes): {len(unique_configs_pool)}")
+
+    matching_configs = []
+
+    for line in unique_configs_pool:
         if is_target_config(line):
-            seen.add(line)
             matching_configs.append(line)
 
     print(f"[*] Found {len(matching_configs)} configs natively using Microsoft/Zoom domains.")
