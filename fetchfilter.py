@@ -15,6 +15,7 @@ SOURCE_URLS = [
     "https://github.com/nikita29a/FreeProxyList/raw/refs/heads/main/mirror/3.txt",
     "https://github.com/nikita29a/FreeProxyList/raw/refs/heads/main/mirror/5.txt",
     "https://raw.githubusercontent.com/wiki/gfpcom/free-proxy-list/lists/vless.txt",
+    "https://raw.githubusercontent.com/whoahaow/rjsxrd/refs/heads/main/githubmirror/bypass/bypass-all.txt",
 ]
 
 # Output files
