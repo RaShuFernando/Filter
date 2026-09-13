@@ -36,6 +36,8 @@ ALLOWED_ROOT_DOMAINS = [
     "skype.com",
 ]
 
+ALLOWED_PORTS = {"443", "8443", 443, 8443}
+
 
 def fetch_url_content(url, timeout=25):
     """Fetches raw subscription text from a given URL."""
@@ -78,6 +80,32 @@ def matches_whitelist(domain):
     for root in ALLOWED_ROOT_DOMAINS:
         if domain == root or domain.endswith("." + root):
             return True
+    return False
+
+
+def has_allowed_port(uri):
+    """
+    Parses the configuration to verify if the port matches the allowed ports.
+    """
+    try:
+        if uri.startswith("vless://") or uri.startswith("trojan://"):
+            parsed = urllib.parse.urlparse(uri)
+            # parsed.port extracts the integer port from the netloc
+            return parsed.port in ALLOWED_PORTS or str(parsed.port) in ALLOWED_PORTS
+
+        elif uri.startswith("vmess://"):
+            b64_str = uri[8:]
+            missing_padding = len(b64_str) % 4
+            if missing_padding:
+                b64_str += "=" * (4 - missing_padding)
+            json_data = json.loads(base64.b64decode(b64_str).decode("utf-8", errors="ignore"))
+            
+            port = json_data.get("port")
+            return port in ALLOWED_PORTS or str(port) in ALLOWED_PORTS
+
+    except Exception:
+        return False
+        
     return False
 
 
@@ -178,10 +206,11 @@ def main():
     matching_configs = []
 
     for line in unique_configs_pool:
-        if is_target_config(line):
+        # Check both the port and the domain constraints
+        if has_allowed_port(line) and is_target_config(line):
             matching_configs.append(line)
 
-    print(f"[*] Found {len(matching_configs)} configs natively using Microsoft/Zoom domains.")
+    print(f"[*] Found {len(matching_configs)} configs matching allowed ports and Microsoft/Zoom domains.")
 
     # Save output as plain text
     raw_content = "\n".join(matching_configs)
